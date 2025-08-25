@@ -16,6 +16,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GH_PAT }}
+        fetch-depth: 0
       
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -52,10 +53,9 @@ jobs:
             def __init__(self):
                 self.config = CONFIG
                 self.base_url = "https://text.pollinations.ai"
-                self.channel_id = "UCtG-elouHQdUnpN9cVLdltg"  # amhoops channel ID
+                self.channel_id = "UCtG-elouHQdUnpN9cVLdltg"
             
             def get_latest_video_id(self):
-                """Get the latest video ID from the predefined channel."""
                 feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={self.channel_id}"
                 feed = feedparser.parse(feed_url)
                 if feed.entries:
@@ -65,7 +65,6 @@ jobs:
                 return None
             
             def get_transcript(self, video_id):
-                """Fetch transcript using Playwright."""
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
                     page = browser.new_page()
@@ -74,15 +73,12 @@ jobs:
                         page.goto("https://youtubetotranscript.com/", timeout=self.config["scraper_timeout"])
                         page.wait_for_load_state("networkidle")
                         
-                        # Fill in the YouTube URL
                         page.fill("input[placeholder*='YouTube']", f"https://youtu.be/{video_id}")
                         page.click("button:has-text('Get Transcript')")
                         
-                        # Wait for transcript to load
                         page.wait_for_selector("#transcript", timeout=self.config["scraper_timeout"])
-                        time.sleep(2)  # Additional wait for dynamic content
+                        time.sleep(2)
                         
-                        # Extract transcript
                         segments = page.query_selector_all("#transcript .transcript-segment")
                         transcript = " ".join(seg.text_content().strip() for seg in segments if seg.text_content().strip())
                         return transcript
@@ -94,7 +90,6 @@ jobs:
                         browser.close()
             
             def rewrite_text(self, text):
-                """Rewrite text to be unique using Pollinations API."""
                 prompt = f"Rewrite this to be completely unique while maintaining meaning. Keep word count similar. Add [PAUSE] markers for TTS: {text}"
                 url = f"{self.base_url}/{requests.utils.quote(prompt)}"
                 
@@ -110,33 +105,28 @@ jobs:
                             break
                         time.sleep(self.config["retry_delay"])
                 
-                return text  # Return original if all retries fail
+                return text
             
             def generate_script(self):
-                """Generate the complete unique script."""
-                # Get latest video
                 video_id = self.get_latest_video_id()
                 if not video_id:
                     print("Failed to get latest video ID")
                     return None
                 
-                # Get transcript
                 transcript = self.get_transcript(video_id)
                 if not transcript:
                     print("Failed to get transcript")
                     return None
                 
-                # Process transcript
                 words = transcript.split()
                 chunks = [' '.join(words[i:i + self.config["chunk_size"]]) 
                          for i in range(0, len(words), self.config["chunk_size"])]
                 
-                # Rewrite chunks
                 rewritten = []
                 for chunk in chunks:
                     rewritten_chunk = self.rewrite_text(chunk)
                     rewritten.append(rewritten_chunk)
-                    time.sleep(0.5)  # Avoid rate limiting
+                    time.sleep(0.5)
                 
                 return '\n\n'.join(rewritten).strip()
 
@@ -149,6 +139,8 @@ jobs:
                 with open("s1.txt", "w", encoding="utf-8") as f:
                     f.write(script)
                 print(f"✅ Success! Script saved to s1.txt ({len(script.split())} words)")
+                print("First 200 characters:")
+                print(script[:200])
             else:
                 print("❌ Script generation failed")
 
@@ -161,9 +153,19 @@ jobs:
       run: |
         echo "Starting script generation..."
         python generate_script.py
-        echo "Script generation completed. Checking for output files..."
+        echo "Script generation completed."
+        echo "Current directory contents:"
         ls -la
-        [ -f "s1.txt" ] && echo "✅ s1.txt created successfully" || echo "❌ s1.txt not found"
+        echo "Checking s1.txt:"
+        if [ -f "s1.txt" ]; then
+          echo "✅ s1.txt exists"
+          echo "File size: $(wc -c < s1.txt) bytes"
+          echo "Word count: $(wc -w < s1.txt) words"
+          echo "First 3 lines:"
+          head -n 3 s1.txt
+        else
+          echo "❌ s1.txt not found"
+        fi
       
     - name: Set up Git identity
       run: |
@@ -172,15 +174,26 @@ jobs:
         
     - name: Commit and push generated files
       run: |
-        # Only add s1.txt if it exists
-        [ -f "s1.txt" ] && git add s1.txt || echo "s1.txt not found, skipping"
+        echo "Git status before adding:"
+        git status
         
-        # Check if there are changes to commit
-        if git diff --staged --quiet; then
-          echo "No changes to commit - script generation may have failed"
-          exit 0
+        if [ -f "s1.txt" ]; then
+          echo "Adding s1.txt to git..."
+          git add s1.txt
+          echo "Git status after adding:"
+          git status
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit (s1.txt is unchanged)"
+          else
+            echo "Committing changes..."
+            timestamp=$(TZ="UTC" date +"%Y-%m-%d %H:%M:%S UTC")
+            git commit -m "Generated TikTok NBA script: ${timestamp}"
+            echo "Pushing to repository..."
+            git push
+            echo "✅ Successfully pushed s1.txt to repository"
+          fi
         else
-          timestamp=$(TZ="UTC" date +"%Y-%m-%d %H:%M:%S UTC")
-          git commit -m "Generated TikTok NBA script: ${timestamp}"
-          git push
+          echo "s1.txt not found - cannot commit"
+          exit 1
         fi

@@ -90,7 +90,7 @@ jobs:
                 return chunks
             
             def rewrite_chunk(self, chunk):
-                prompt = f"Rewrite this NBA text to be unique while keeping the same meaning and word count. Make it conversational with [PAUSE] markers for TTS. Keep all NBA player names, teams, coaches 100% accurate (Tyrese Maxey, Jared McCain, Kyle Lowry, Kelly Oubre Jr, Nikola Jokic, etc): {chunk}"
+                prompt = f"Rewrite this text to be completely unique while keeping the same meaning and word count. Make it conversational and natural for reading. Keep all names, facts, and specific details 100% accurate. Do not add any pause markers or special formatting: {chunk}"
                 url = f"{self.base_url}/{requests.utils.quote(prompt)}"
                 
                 for attempt in range(3):
@@ -105,16 +105,11 @@ jobs:
                             time.sleep(3 * (2 ** attempt))
                 return chunk
             
-            def fix_names(self, text):
-                fixes = {
-                    r'Dyres?\s*Maxi': 'Tyrese Maxey',
-                    r'VJ\s*Edgecom': 'Jared McCain', 
-                    r'Kyle\s*Larry': 'Kyle Lowry',
-                    r'Kelly\s*Ubé': 'Kelly Oubre Jr',
-                    r'Nicole?\s*Joic': 'Nikola Jokic'
-                }
-                for pattern, fix in fixes.items():
-                    text = re.sub(pattern, fix, text, flags=re.IGNORECASE)
+            def clean_text(self, text):
+                # Remove pause markers and extra whitespace
+                text = re.sub(r'\[PAUSE\]', '', text, flags=re.IGNORECASE)
+                text = re.sub(r'\bPAUSE\b', '', text, flags=re.IGNORECASE)
+                text = re.sub(r'\s+', ' ', text).strip()
                 return text
             
             def generate(self, channel):
@@ -145,7 +140,7 @@ jobs:
                     rewritten.append(self.rewrite_chunk(chunk))
                     time.sleep(0.5)
                 
-                script = self.fix_names('\n\n'.join(rewritten))
+                script = self.clean_text('\n\n'.join(rewritten))
                 
                 with open("s1.txt", "w", encoding="utf-8") as f:
                     f.write(script)
@@ -153,7 +148,7 @@ jobs:
                 print("✅ Done!")
                 return script
         
-        ScriptGen().generate("https://youtube.com/@amhoops")
+        ScriptGen().generate("https://youtube.com/@amhoops")  # Change this URL for different channels
         EOF
         
         python gen.py && rm -f gen.py

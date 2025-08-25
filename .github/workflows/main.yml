@@ -1,4 +1,4 @@
-name: Generate Engaging NBA Script
+name: Generate Unique NBA Script
 on:
   workflow_dispatch:
   schedule:
@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: write
+  contents: write  # Add this permission
 
 jobs:
   generate-script:
@@ -17,7 +17,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.GH_PAT }}
+        token: ${{ secrets.GH_PAT }}  # Use PAT for checkout
       
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -36,6 +36,7 @@ jobs:
       run: |
         cat > generate_script.py << 'EOF'
         import os
+        import json
         import time
         import requests
         import re
@@ -43,20 +44,24 @@ jobs:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
         import feedparser
         
+        # Configuration
         CONFIG = {
-            "chunk_size": 40,
-            "max_retries": 3,
-            "retry_delay": 2,
-            "scraper_timeout": 30000,
-            "api_timeout": 30,
+            "default_num_sections": 4,
+            "default_words_per_section": 1500,
+            "chunk_size": 50,  # Target word count for each chunk
+            "max_retries": 3,  # Maximum number of retries for rate-limited requests
+            "retry_delay": 3,  # Base delay in seconds between retries
+            "scraper_timeout": 30000,  # 30 seconds for scraper operations
+            "api_timeout": 30,  # 30 seconds for API requests
         }
         
-        class EngagingScriptGenerator:
+        class YouTubeScriptGenerator:
             def __init__(self, config):
                 self.config = config
                 self.base_url = "https://text.pollinations.ai"
             
             def get_channel_id_from_handle(self, channel_handle):
+                """Get channel ID from channel handle."""
                 try:
                     handle = channel_handle.replace('@', '').replace('https://youtube.com/@', '').replace('https://www.youtube.com/@', '')
                     feed_url = f"https://www.youtube.com/feeds/videos.xml?user={handle}"
@@ -70,12 +75,14 @@ jobs:
                         channel_link = feed.feed.get('link', '')
                         if 'channel/' in channel_link:
                             return channel_link.split('channel/')[-1]
+                    
                     return None
                 except Exception as e:
                     print(f"Error getting channel ID: {e}")
                     return None
             
             def get_latest_video_id_from_channel_id(self, channel_id):
+                """Gets the latest video ID from a YouTube channel ID."""
                 feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
                 feed = feedparser.parse(feed_url)
                 if feed.entries:
@@ -85,7 +92,26 @@ jobs:
                         return video_id_match.group(1)
                 return None
             
+            def extract_video_id(self, url):
+                """Extract video ID from various YouTube URL formats."""
+                if 'youtu.be/' in url:
+                    return url.split('youtu.be/')[-1].split('?')[0]
+                
+                if 'youtube.com/watch' in url:
+                    match = re.search(r'v=([a-zA-Z0-9_-]{11})', url)
+                    if match:
+                        return match.group(1)
+                
+                if 'youtube.com/embed/' in url:
+                    return url.split('youtube.com/embed/')[-1].split('?')[0]
+                
+                if re.match(r'^[a-zA-Z0-9_-]{11}$', url):
+                    return url
+                
+                return None
+            
             def get_youtube_transcript(self, video_id):
+                """Fetch transcript using the scraper with improved error handling."""
                 youtube_url = f"https://youtu.be/{video_id}"
                 
                 with sync_playwright() as p:
@@ -93,18 +119,26 @@ jobs:
                     page = browser.new_page()
                     
                     try:
+                        print("🌐 Navigating to transcript service...")
                         page.goto("https://youtubetotranscript.com/", timeout=self.config["scraper_timeout"])
+                        
+                        # Wait for page load
                         page.wait_for_load_state("networkidle", timeout=self.config["scraper_timeout"])
                         
+                        # Input handling
                         input_selector = "input.w-full.mb-2.truncate.input.input-bordered.input-rounded.sm\\:w-sm.sm\\:mb-0.sm\\:mr-2"
                         page.wait_for_selector(input_selector, timeout=self.config["scraper_timeout"])
                         page.fill(input_selector, youtube_url)
                         
+                        # Submit form
                         button_selector = "button.w-full.btn.btn-secondary.btn-rounded.sm\\:w-auto"
                         page.click(button_selector)
-                        page.wait_for_load_state("networkidle", timeout=self.config["scraper_timeout"])
-                        time.sleep(3)
                         
+                        # Wait for results
+                        page.wait_for_load_state("networkidle", timeout=self.config["scraper_timeout"])
+                        time.sleep(3)  # Additional wait for dynamic content
+                        
+                        # Extract transcript
                         html_content = page.content()
                         soup = BeautifulSoup(html_content, 'html.parser')
                         transcript_div = soup.find('div', {'id': 'transcript'})
@@ -117,15 +151,20 @@ jobs:
                             raise Exception("No transcript segments found")
                         
                         transcript_text = " ".join(seg.get_text().strip() for seg in segments if seg.get_text().strip())
+                        print(f"✅ Extracted {len(segments)} segments")
                         return transcript_text.strip()
                         
+                    except PlaywrightTimeoutError:
+                        print("⏱️ Timeout during transcript extraction")
+                        return ""
                     except Exception as e:
-                        print(f"Transcript extraction failed: {str(e)}")
+                        print(f"❌ Transcript extraction failed: {str(e)}")
                         return ""
                     finally:
                         browser.close()
             
-            def split_into_chunks(self, transcript, chunk_size=40):
+            def split_into_chunks(self, transcript, chunk_size=50):
+                """Split transcript into chunks of approximately chunk_size words."""
                 words = transcript.split()
                 chunks = []
                 current_chunk = []
@@ -140,22 +179,52 @@ jobs:
                         current_chunk = []
                         current_count = 0
                 
+                # Add the last chunk if it has any words
                 if current_chunk:
                     chunks.append(' '.join(current_chunk))
                 
                 return chunks
             
-            def enhance_chunk(self, chunk, chunk_index, total_chunks):
-                if chunk_index == 0:  # Opening hook
-                    prompt = f"Transform this into an irresistible YouTube opening that hooks viewers instantly. Make it conversational, exciting, and add [PAUSE] markers. Use phrases like 'You won't believe what just happened' or 'This changes everything'. Content: {chunk}"
-                elif chunk_index < total_chunks // 2:  # Build engagement
-                    prompt = f"Rewrite this to build massive intrigue with mini-cliffhangers. Add transitions like 'But here's where it gets crazy...' and strategic [PAUSE] markers. Make it engaging and conversational. Content: {chunk}"
-                else:  # Strong finish
-                    prompt = f"Transform this into powerful content that delivers impact. Add [PAUSE] markers and use phrases like 'Here's what this means...' or 'The bottom line is...'. Make it memorable. Content: {chunk}"
+            def clean_script_output(self, raw_text):
+                """Clean and fix common errors in the generated script output."""
+                # Fix common name errors
+                name_fixes = {
+                    r'Dyres?\s*Maxi': 'Tyrese Maxey',
+                    r'VJ\s*Edgecom': 'Jared McCain', 
+                    r'Kyle\s*Larry': 'Kyle Lowry',
+                    r'Kelly\s*Ubé': 'Kelly Oubre Jr',
+                    r'Nicole?\s*Joic': 'Nikola Jokic',
+                    r'Desmond\s*Bane.*Orlando': 'Paolo Banchero from Orlando',
+                    r'Tom\s*Thibodeau.*fired': 'Tom Thibodeau is still coaching',
+                    r'Mike\s*Brown.*Knicks': 'Tom Thibodeau coaching the Knicks'
+                }
                 
-                return self.make_api_request(prompt)
+                cleaned_text = raw_text
+                for pattern, replacement in name_fixes.items():
+                    cleaned_text = re.sub(pattern, replacement, cleaned_text, flags=re.IGNORECASE)
+                
+                # Clean formatting issues
+                lines = cleaned_text.splitlines()
+                cleaned_lines = []
+                skip_patterns = [
+                    r'^\s*(\*+|---+|###*|Section \d+.*|End of.*|Preparation for.*|Continuity Notes.*|Please Provide.*|Generating script.*|Context.*|Tone:.*|Events:.*|Character Development:.*|NOTE:.*)',
+                    r'.*outline.*',
+                    r'^\s*\[.*\]\s*$',
+                    r'^\s*#{1,6}\s*',
+                ]
+                
+                for line in lines:
+                    if any(re.match(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+                        continue
+                    if "NOTE:" in line or (line.strip().endswith(":") and len(line.strip()) < 50):
+                        continue
+                    cleaned_lines.append(line)
+                
+                return '\n'.join(cleaned_lines).strip()
             
-            def make_api_request(self, prompt):
+            def rewrite_chunk(self, chunk, target_word_count):
+                """Rewrite a single chunk using GET request method with exponential backoff."""
+                prompt = f"Rewrite this NBA basketball text to be completely unique while maintaining the same meaning and keeping the word count around {target_word_count} words. Make it conversational and add [PAUSE] markers where natural for TTS delivery. IMPORTANT: Keep all player names, team names, coaches, and NBA facts 100% accurate - do not change or misspell any names like Tyrese Maxey, Jared McCain, Kyle Lowry, Kelly Oubre Jr, Nikola Jokic, etc. Ensure all NBA information is factually correct: {chunk}"
                 encoded_prompt = requests.utils.quote(prompt)
                 url = f"{self.base_url}/{encoded_prompt}"
                 
@@ -165,94 +234,161 @@ jobs:
                         if response.status_code == 200:
                             return response.text.strip()
                         elif response.status_code == 429:
+                            delay = self.config["retry_delay"] * (2 ** attempt)  # Exponential backoff
+                            print(f"⚠️ Rate limited. Retrying in {delay} seconds... (Attempt {attempt + 1}/{self.config['max_retries']})")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            print(f"❌ GET request failed with status {response.status_code}")
+                            return None
+                    except Exception as e:
+                        print(f"❌ GET request failed (attempt {attempt + 1}/{self.config['max_retries']}): {e}")
+                        if attempt < self.config["max_retries"] - 1:
                             delay = self.config["retry_delay"] * (2 ** attempt)
+                            print(f"⏳ Retrying in {delay} seconds...")
                             time.sleep(delay)
                             continue
                         else:
                             return None
-                    except Exception as e:
-                        if attempt < self.config["max_retries"] - 1:
-                            time.sleep(self.config["retry_delay"] * (2 ** attempt))
-                        else:
-                            return None
+                
                 return None
             
-            def final_polish(self, script):
-                polish_prompt = f"""Make this YouTube script incredibly engaging by:
-                1. Adding strategic hooks every 60 seconds to keep viewers watching
-                2. Fixing any player names or factual errors
-                3. Adding smooth transitions between topics
-                4. Optimizing [PAUSE] markers for perfect TTS delivery
-                5. Creating a powerful opening and strong ending
-                6. Making it conversational and binge-worthy
+            def generate_full_script(self, channel_handle, num_sections=None, words_per_section=None):
+                """Generate a completely unique YouTube script based on the competitor's latest video."""
+                chunk_size = self.config["chunk_size"]
                 
-                Script: {script}"""
+                print("🎬 Starting YouTube Script Generation...")
                 
-                polished = self.make_api_request(polish_prompt)
-                return polished if polished else script
-            
-            def generate_engaging_script(self, channel_handle):
-                print("🚀 Starting engaging script generation...")
+                # Get channel ID from handle
+                print(f"🔍 Getting channel ID from: {channel_handle}")
                 
-                # Get channel ID
+                # Handle different input formats
                 if channel_handle.startswith('UC') and len(channel_handle) == 24:
+                    # Already a channel ID
                     channel_id = channel_handle
                 else:
+                    # It's a handle, convert to channel ID
                     channel_id = self.get_channel_id_from_handle(channel_handle)
-                    if not channel_id and 'amhoops' in channel_handle.lower():
-                        channel_id = "UCtG-elouHQdUnpN9cVLdltg"
+                    if not channel_id:
+                        # Try the known channel ID for @amhoops
+                        if 'amhoops' in channel_handle.lower():
+                            channel_id = "UCtG-elouHQdUnpN9cVLdltg"
+                        else:
+                            print("❌ Could not get channel ID from handle")
+                            return None
                 
-                if not channel_id:
-                    print("❌ Could not get channel ID")
-                    return None
+                print(f"✅ Channel ID: {channel_id}")
                 
-                # Get latest video and transcript
+                # Get latest video transcript
+                print("📹 Fetching latest video from channel...")
                 latest_video_id = self.get_latest_video_id_from_channel_id(channel_id)
+                
                 if not latest_video_id:
+                    print("❌ Could not find latest video from channel")
                     return None
+                    
+                print(f"✅ Found video ID: {latest_video_id}")
                 
+                # Get transcript
+                print("📝 Fetching video transcript...")
                 original_transcript = self.get_youtube_transcript(latest_video_id)
+                
                 if not original_transcript:
+                    print("❌ Could not fetch transcript")
                     return None
+                    
+                print(f"✅ Transcript fetched: {len(original_transcript)} characters")
+                print(f"📊 Original word count: {len(original_transcript.split())} words")
                 
-                print(f"📝 Processing {len(original_transcript.split())} words...")
+                # Print a preview of the transcript
+                print("\n📋 TRANSCRIPT PREVIEW:")
+                print("-" * 30)
+                preview = original_transcript[:300].replace('\n', ' ')
+                print(f"{preview}...")
                 
-                # Transform chunks with engagement
-                chunks = self.split_into_chunks(original_transcript, self.config["chunk_size"])
-                transformed_chunks = []
+                # Split transcript into chunks
+                print(f"\n🔄 Splitting transcript into {chunk_size}-word chunks...")
+                chunks = self.split_into_chunks(original_transcript, chunk_size)
+                print(f"✅ Created {len(chunks)} chunks")
+                
+                # Rewrite each chunk
+                print(f"\n🔄 Rewriting {len(chunks)} chunks...")
+                rewritten_chunks = []
+                failed_chunks = 0
                 
                 for i, chunk in enumerate(chunks):
-                    print(f"⚡ Enhancing chunk {i+1}/{len(chunks)}...")
-                    enhanced = self.enhance_chunk(chunk, i, len(chunks))
-                    transformed_chunks.append(enhanced if enhanced else chunk)
-                    time.sleep(0.8)
-                
-                # Final polish
-                raw_script = '\n\n'.join(transformed_chunks)
-                final_script = self.final_polish(raw_script)
-                
-                if final_script:
-                    with open("s1.txt", "w", encoding="utf-8") as f:
-                        f.write(final_script)
+                    print(f"⏳ Rewriting chunk {i+1}/{len(chunks)} (Original: {len(chunk.split())} words)...")
                     
-                    print(f"✅ Engaging script created: {len(final_script.split())} words")
-                    return final_script
+                    rewritten_chunk = self.rewrite_chunk(chunk, len(chunk.split()))
+                    
+                    if rewritten_chunk:
+                        rewritten_word_count = len(rewritten_chunk.split())
+                        print(f"✅ Chunk {i+1} rewritten successfully (Rewritten: {rewritten_word_count} words)")
+                        rewritten_chunks.append(rewritten_chunk)
+                    else:
+                        print(f"❌ Failed to rewrite chunk {i+1}")
+                        # Use original chunk as fallback
+                        rewritten_chunks.append(chunk)
+                        failed_chunks += 1
+                        
+                    # Add a small delay between requests to avoid rate limiting
+                    time.sleep(0.5)
+                
+                # Combine chunks into full script
+                full_script = '\n\n'.join(rewritten_chunks)
+                
+                # Clean and fix common errors
+                full_script = self.clean_script_output(full_script)
+                
+                # REMOVED: Don't create the timestamped file anymore
+                # Only save as s1.txt
+                if full_script:
+                    print(f"\n🎉 Complete unique script generated!")
+                    print(f"📈 Final word count: {len(full_script.split())} words")
+                    if failed_chunks > 0:
+                        print(f"⚠️ {failed_chunks} chunks failed to rewrite and were kept as original")
+                    return full_script.strip()
                 
                 return None
         
         def main():
-            generator = EngagingScriptGenerator(CONFIG)
-            CHANNEL_HANDLE = "https://youtube.com/@amhoops"
+            generator = YouTubeScriptGenerator(CONFIG)
             
-            print("🎬 Engagement-Focused YouTube Script Generator")
-            script = generator.generate_engaging_script(CHANNEL_HANDLE)
+            CHANNEL_HANDLE = "https://youtube.com/@amhoops"  # Competitor's channel
+            CHUNK_SIZE = CONFIG["chunk_size"]
             
-            if script:
-                print("🎉 SUCCESS: Engagement-optimized script ready!")
+            print("🚀 YouTube Script Generator Started!")
+            print(f"📺 Channel: {CHANNEL_HANDLE}")
+            print(f"🔄 Task: Creating a completely unique script from competitor's latest video")
+            print(f"📊 Chunk size: {CHUNK_SIZE} words (maintaining original paragraph length)")
+            print(f"🎙️ Optimized for: Microsoft Edge TTS")
+            print(f"🌐 API: Pollinations.AI (GET method)")
+            print(f"⏱️ Rate limiting: {CONFIG['max_retries']} retries with exponential backoff")
+            print("-" * 50)
+            
+            final_script = generator.generate_full_script(
+                channel_handle=CHANNEL_HANDLE
+            )
+            
+            if final_script:
+                print(f"\n🎊 SUCCESS! Completely unique script created!")
+                print(f"📝 Total words: {len(final_script.split())}")
+                print(f"⏱️ Estimated duration: {len(final_script.split()) // 150} minutes")
+                print("\n📋 PREVIEW:")
+                print("-" * 30)
+                preview = final_script[:500].replace('\n', ' ')
+                print(f"{preview}...")
+                print("\n🎙️ Ready for Microsoft Edge Text-to-Speech!")
+                
+                # Save ONLY as s1.txt
+                with open("s1.txt", "w", encoding="utf-8") as f:
+                    f.write(final_script)
+                print("✅ Script saved as s1.txt")
+                
+                return final_script
             else:
-                print("❌ Script generation failed")
-            
-            return script
+                print("\n❌ Script creation failed")
+                return None
         
         if __name__ == "__main__":
             main()
@@ -261,154 +397,28 @@ jobs:
     - name: Run script generation
       timeout-minutes: 30
       run: |
+        echo "Starting script generation..."
         python generate_script.py
-        [ -f "s1.txt" ] && echo "✅ s1.txt created" || echo "❌ s1.txt not found"
+        echo "Script generation completed. Checking for output files..."
+        ls -la
+        echo "Contents of current directory after script execution:"
+        [ -f "s1.txt" ] && echo "✅ s1.txt created successfully" || echo "❌ s1.txt not found"
+        
+        # Clean up the temporary Python script
         rm -f generate_script.py
+        echo "✅ Temporary generate_script.py removed"
       
     - name: Set up Git identity
       run: |
         git config --global user.name "cowboycode9"
         git config --global user.email "cowboycode9@outlook.com"
         
-    - name: Commit and push script
+    - name: Commit and push generated files
       run: |
+        # Only add s1.txt if it exists
         if [ -f "s1.txt" ]; then
           git add s1.txt
+          
+          # Check if there are changes to commit
           if ! git diff --staged --quiet; then
-            git commit -m "🔥 Generated engaging NBA script - $(date '+%Y-%m-%d %H:%M:%S')"
-            git push
-            echo "✅ Script pushed successfully!"
-          fi
-        fi            
-            def post_process_script(self, script):
-                """Enhanced post-processing for maximum engagement."""
-                
-                post_process_prompt = f"""
-                Take this YouTube script and make it INCREDIBLY engaging and binge-worthy. Apply these techniques:
-                
-                1. ADD STRATEGIC HOOKS: Insert retention hooks every 30-60 seconds
-                2. IMPROVE FLOW: Add smooth transitions between topics  
-                3. CREATE CURIOSITY GAPS: Tease information before revealing it
-                4. ADD CALL-OUTS: Include viewer engagement like "Comment below if you agree"
-                5. STRENGTHEN OPENING: Make first 15 seconds absolutely irresistible
-                6. POWERFUL ENDING: Strong call-to-action and subscribe prompt
-                7. OPTIMIZE PACING: Add [PAUSE] markers for perfect TTS delivery
-                8. FIX ANY ERRORS: Correct player names, facts, and grammar
-                
-                Make this script so engaging that viewers CAN'T stop watching. Here's the script:
-                
-                {script}
-                """
-                
-                enhanced_script = self.make_api_request(post_process_prompt)
-                return enhanced_script if enhanced_script else script
-            
-            def generate_engaging_script(self, channel_handle):
-                """Generate an incredibly engaging YouTube script."""
-                
-                print("🚀 ENGAGING SCRIPT GENERATOR ACTIVATED!")
-                print("🎯 Mission: Create content so good viewers can't click away")
-                print("-" * 60)
-                
-                # Get channel ID
-                if channel_handle.startswith('UC') and len(channel_handle) == 24:
-                    channel_id = channel_handle
-                else:
-                    channel_id = self.get_channel_id_from_handle(channel_handle)
-                    if not channel_id:
-                        if 'amhoops' in channel_handle.lower():
-                            channel_id = "UCtG-elouHQdUnpN9cVLdltg"
-                        else:
-                            print("❌ Could not get channel ID")
-                            return None
-                
-                print(f"✅ Target Channel ID: {channel_id}")
-                
-                # Get latest video
-                latest_video_id = self.get_latest_video_id_from_channel_id(channel_id)
-                if not latest_video_id:
-                    print("❌ Could not find latest video")
-                    return None
-                
-                print(f"🎬 Latest Video ID: {latest_video_id}")
-                
-                # Get transcript
-                original_transcript = self.get_youtube_transcript(latest_video_id)
-                if not original_transcript:
-                    print("❌ Could not fetch transcript")
-                    return None
-                
-                print(f"📝 Original transcript: {len(original_transcript.split())} words")
-                
-                # Split into strategic chunks
-                chunks = self.split_into_chunks(original_transcript, self.config["chunk_size"])
-                print(f"🧩 Created {len(chunks)} strategic chunks")
-                
-                # Transform each chunk with engagement techniques
-                print("\n🔥 APPLYING ENGAGEMENT TECHNIQUES...")
-                transformed_chunks = []
-                failed_chunks = 0
-                
-                for i, chunk in enumerate(chunks):
-                    print(f"⚡ Transforming chunk {i+1}/{len(chunks)} with engagement boost...")
-                    
-                    enhanced_chunk = self.enhance_chunk_with_engagement(chunk, i, len(chunks))
-                    
-                    if enhanced_chunk:
-                        print(f"✅ Chunk {i+1} transformed successfully!")
-                        transformed_chunks.append(enhanced_chunk)
-                    else:
-                        print(f"❌ Failed to transform chunk {i+1}")
-                        transformed_chunks.append(chunk)
-                        failed_chunks += 1
-                    
-                    # Strategic delay to avoid rate limits
-                    time.sleep(1)
-                
-                # Combine and enhance full script
-                raw_script = '\n\n'.join(transformed_chunks)
-                
-                print("\n🎨 APPLYING FINAL ENGAGEMENT POLISH...")
-                final_script = self.post_process_script(raw_script)
-                
-                if final_script:
-                    print(f"\n🎉 ENGAGEMENT-OPTIMIZED SCRIPT CREATED!")
-                    print(f"📊 Final word count: {len(final_script.split())} words")
-                    print(f"🎬 Estimated watch time: {len(final_script.split()) // 150}-{len(final_script.split()) // 130} minutes")
-                    print(f"⚠️ Failed chunks: {failed_chunks}/{len(chunks)}")
-                    
-                    # Save the engaging script
-                    with open("s1.txt", "w", encoding="utf-8") as f:
-                        f.write(final_script)
-                    
-                    print("✅ BINGE-WORTHY SCRIPT SAVED AS s1.txt!")
-                    
-                    # Show preview
-                    print("\n📺 SCRIPT PREVIEW:")
-                    print("=" * 50)
-                    preview = final_script[:400].replace('\n', ' ')
-                    print(f"{preview}...")
-                    print("=" * 50)
-                    print("🎯 This script is designed to maximize viewer retention!")
-                    
-                    return final_script
-                
-                return None
-        
-        def main():
-            generator = EngagingScriptGenerator(CONFIG)
-            
-            CHANNEL_HANDLE = "https://youtube.com/@amhoops"
-            
-            print("🎬 ENGAGEMENT-FOCUSED YOUTUBE SCRIPT GENERATOR")
-            print("=" * 60)
-            print("🎯 OBJECTIVE: Create irresistible content that hooks viewers")
-            print("🔥 TECHNIQUES: Story hooks, curiosity gaps, pattern interrupts")
-            print("⚡ OPTIMIZATION: Maximum retention and engagement")
-            print("🎙️ TTS READY: Perfect pacing with strategic pauses")
-            print("=" * 60)
-            
-            script = generator.generate_engaging_script(CHANNEL_HANDLE)
-            
-            if script:
-                print("\n🏆 SUCCESS: ENGAGEMENT-O
+ 

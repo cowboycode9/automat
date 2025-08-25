@@ -46,7 +46,7 @@ jobs:
         CONFIG = {
             "default_num_sections": 4,
             "default_words_per_section": 1500,
-            "chunk_size": 50,  # Target word count for each chunk
+            "chunk_size": 50,
             "max_retries": 3,
             "retry_delay": 3,
             "scraper_timeout": 30000,
@@ -319,7 +319,7 @@ jobs:
             
             if final_script:
                 print(f"\n🎊 SUCCESS! Completely unique script created!")
-                print(f"📝 Total words: {len(final_script.split())}")
+                print(f"📝 Total words: {len(final_script.split())} words")
                 print(f"⏱️ Estimated duration: {len(final_script.split()) // 150} minutes")
                 print("\n📋 PREVIEW:")
                 print("-" * 30)
@@ -349,71 +349,8 @@ jobs:
         echo "Script generation completed. Checking for output files..."
         ls -la
         echo "Contents of current directory after script execution:"
-        [ -f "s1.txt" ] && echo "✅ s1.txt created successfully" || echo "❌ s1.txt not found"
-      
-    - name: Set up Git identity
-      run: |
-        git config --global user.name "cowboycode9"
-        git config --global user.email "cowboycode9@outlook.com"
-        
-    - name: Commit and push generated files
-      run: |
-        # Only add s1.txt if it exists
-        [ -f "s1.txt" ] && git add s1.txt || echo "s1.txt not found, skipping"
-        
-        # Check if there are changes to commit
-        if git diff --staged --quiet; then
-          echo "No changes to commit - script generation may have failed"
-          exit 0
-        else
-          timestamp=$(TZ="UTC" date +"%Y-%m-%d %H:%M:%S UTC")
-          git commit -m "Generated TikTok NBA script: ${timestamp}"
-          git push
-        fi                words = transcript.split()
-                chunks = [' '.join(words[i:i + self.config["chunk_size"]]) 
-                         for i in range(0, len(words), self.config["chunk_size"])]
-                
-                rewritten = []
-                for chunk in chunks:
-                    rewritten_chunk = self.rewrite_text(chunk)
-                    rewritten.append(rewritten_chunk)
-                    time.sleep(0.5)
-                
-                return '\n\n'.join(rewritten).strip()
-
-        def main():
-            print("🚀 Starting script generation...")
-            generator = YouTubeScriptGenerator()
-            script = generator.generate_script()
-            
-            if script:
-                with open("s1.txt", "w", encoding="utf-8") as f:
-                    f.write(script)
-                print(f"✅ Success! Script saved to s1.txt ({len(script.split())} words)")
-                print("First 200 characters:")
-                print(script[:200])
-            else:
-                print("❌ Script generation failed")
-
-        if __name__ == "__main__":
-            main()
-        EOF
-        
-    - name: Run script generation
-      timeout-minutes: 30
-      run: |
-        echo "Starting script generation..."
-        python generate_script.py
-        echo "Script generation completed."
-        echo "Current directory contents:"
-        ls -la
-        echo "Checking s1.txt:"
         if [ -f "s1.txt" ]; then
-          echo "✅ s1.txt exists"
-          echo "File size: $(wc -c < s1.txt) bytes"
-          echo "Word count: $(wc -w < s1.txt) words"
-          echo "First 3 lines:"
-          head -n 3 s1.txt
+          echo "✅ s1.txt created successfully"
         else
           echo "❌ s1.txt not found"
         fi
@@ -425,26 +362,18 @@ jobs:
         
     - name: Commit and push generated files
       run: |
-        echo "Git status before adding:"
-        git status
-        
+        # Only add s1.txt if it exists
         if [ -f "s1.txt" ]; then
-          echo "Adding s1.txt to git..."
           git add s1.txt
-          echo "Git status after adding:"
-          git status
           
+          # Check if there are changes to commit
           if git diff --staged --quiet; then
-            echo "No changes to commit (s1.txt is unchanged)"
+            echo "No changes to commit - script generation may have failed"
           else
-            echo "Committing changes..."
             timestamp=$(TZ="UTC" date +"%Y-%m-%d %H:%M:%S UTC")
             git commit -m "Generated TikTok NBA script: ${timestamp}"
-            echo "Pushing to repository..."
             git push
-            echo "✅ Successfully pushed s1.txt to repository"
           fi
         else
-          echo "s1.txt not found - cannot commit"
-          exit 1
+          echo "s1.txt not found, skipping commit"
         fi

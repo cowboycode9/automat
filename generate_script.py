@@ -1,0 +1,356 @@
+import os
+import json
+import time
+import requests
+import re
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import feedparser
+
+# Configuration
+CONFIG = {
+    "default_num_sections": 4,
+    "default_words_per_section": 1500,
+    "chunk_size": 50,  # Target word count for each chunk
+    "max_retries": 3,  # Maximum number of retries for rate-limited requests
+    "retry_delay": 3,  # Base delay in seconds between retries
+    "scraper_timeout": 30000,  # 30 seconds for scraper operations
+    "api_timeout": 30,  # 30 seconds for API requests
+}
+
+class YouTubeScriptGenerator:
+    def __init__(self, config):
+        self.config = config
+        self.base_url = "https://text.pollinations.ai"
+    
+    def get_channel_id_from_handle(self, channel_handle):
+        """Get channel ID from channel handle."""
+        try:
+            handle = channel_handle.replace('@', '').replace('https://youtube.com/@', '').replace('https://www.youtube.com/@', '')
+            feed_url = f"https://www.youtube.com/feeds/videos.xml?user={handle}"
+            feed = feedparser.parse(feed_url)
+            
+            if not feed.entries:
+                feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={handle}"
+                feed = feedparser.parse(feed_url)
+            
+            if feed.entries:
+                channel_link = feed.feed.get('link', '')
+                if 'channel/' in channel_link:
+                    return channel_link.split('channel/')[-1]
+            
+            return None
+        except Exception as e:
+            print(f"Error getting channel ID: {e}")
+            return None
+    
+    def get_latest_video_id_from_channel_id(self, channel_id):
+        """Gets the latest video ID from a YouTube channel ID."""
+        feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        feed = feedparser.parse(feed_url)
+        if feed.entries:
+            video_link = feed.entries[0].link
+            video_id_match = re.search(r"v=([a-zA-Z0-9_-]+)", video_link)
+            if video_id_match:
+                return video_id_match.group(1)
+        return None
+    
+    def extract_video_id(self, url):
+        """Extract video ID from various YouTube URL formats."""
+        if 'youtu.be/' in url:
+            return url.split('youtu.be/')[-1].split('?')[0]
+        
+        if 'youtube.com/watch' in url:
+            match = re.search(r'v=([a-zA-Z0-9_-]{11})', url)
+            if match:
+                return match.group(1)
+        
+        if 'youtube.com/embed/' in url:
+            return url.split('youtube.com/embed/')[-1].split('?')[0]
+        
+        if re.match(r'^[a-zA-Z0-9_-]{11}$', url):
+            return url
+        
+        return None
+    
+    def get_youtube_transcript(self, video_id):
+        """Fetch transcript using the scraper with improved error handling."""
+        youtube_url = f"https://youtu.be/{video_id}"
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            
+            try:
+                print("🌐 Navigating to transcript service...")
+                page.goto("https://youtubetotranscript.com/", timeout=self.config["scraper_timeout"])
+                
+                # Wait for page load
+                page.wait_for_load_state("networkidle", timeout=self.config["scraper_timeout"])
+                
+                # Input handling
+                input_selector = "input.w-full.mb-2.truncate.input.input-bordered.input-rounded.sm\\:w-sm.sm\\:mb-0.sm\\:mr-2"
+                page.wait_for_selector(input_selector, timeout=self.config["scraper_timeout"])
+                page.fill(input_selector, youtube_url)
+                
+                # Submit form
+                button_selector = "button.w-full.btn.btn-secondary.btn-rounded.sm\\:w-auto"
+                page.click(button_selector)
+                
+                # Wait for results
+                page.wait_for_load_state("networkidle", timeout=self.config["scraper_timeout"])
+                time.sleep(3)  # Additional wait for dynamic content
+                
+                # Extract transcript
+                html_content = page.content()
+                soup = BeautifulSoup(html_content, 'html.parser')
+                transcript_div = soup.find('div', {'id': 'transcript'})
+                
+                if not transcript_div:
+                    raise Exception("Transcript container not found")
+                
+                segments = transcript_div.find_all('span', class_='transcript-segment')
+                if not segments:
+                    raise Exception("No transcript segments found")
+                
+                transcript_text = " ".join(seg.get_text().strip() for seg in segments if seg.get_text().strip())
+                print(f"✅ Extracted {len(segments)} segments")
+                return transcript_text.strip()
+                
+            except PlaywrightTimeoutError:
+                print("⏱️ Timeout during transcript extraction")
+                return ""
+            except Exception as e:
+                print(f"❌ Transcript extraction failed: {str(e)}")
+                return ""
+            finally:
+                browser.close()
+    
+    def split_into_chunks(self, transcript, chunk_size=50):
+        """Split transcript into chunks of approximately chunk_size words."""
+        words = transcript.split()
+        chunks = []
+        current_chunk = []
+        current_count = 0
+        
+        for word in words:
+            current_chunk.append(word)
+            current_count += 1
+            
+            if current_count >= chunk_size:
+                chunks.append(' '.join(current_chunk))
+                current_chunk = []
+                current_count = 0
+        
+        # Add the last chunk if it has any words
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        
+        return chunks
+    
+    def clean_script_output(self, raw_text):
+        """Clean the generated script output."""
+        lines = raw_text.splitlines()
+        cleaned_lines = []
+        skip_patterns = [
+            r'^\s*(\*+|---+|###*|Section \d+.*|End of.*|Preparation for.*|Continuity Notes.*|Please Provide.*|Generating script.*|Context.*|Tone:.*|Events:.*|Character Development:.*|NOTE:.*)',
+            r'.*outline.*',
+            r'^\s*\[.*\]\s*$',
+            r'^\s*#{1,6}\s*',
+        ]
+        
+        for line in lines:
+            if any(re.match(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+                continue
+            if "NOTE:" in line or (line.strip().endswith(":") and len(line.strip()) < 50):
+                continue
+            cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines).strip()
+    
+    def rewrite_chunk(self, chunk, target_word_count):
+        """Rewrite a single chunk using GET request method with exponential backoff."""
+        prompt = f"Rewrite this text to be completely unique while maintaining the same meaning and keeping the word count around {target_word_count} words. Make it conversational and add [PAUSE] markers where natural for TTS delivery: {chunk}"
+        encoded_prompt = requests.utils.quote(prompt)
+        url = f"{self.base_url}/{encoded_prompt}"
+        
+        for attempt in range(self.config["max_retries"]):
+            try:
+                response = requests.get(url, timeout=self.config["api_timeout"])
+                if response.status_code == 200:
+                    return response.text.strip()
+                elif response.status_code == 429:
+                    delay = self.config["retry_delay"] * (2 ** attempt)  # Exponential backoff
+                    print(f"⚠️ Rate limited. Retrying in {delay} seconds... (Attempt {attempt + 1}/{self.config['max_retries']})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"❌ GET request failed with status {response.status_code}")
+                    return None
+            except Exception as e:
+                print(f"❌ GET request failed (attempt {attempt + 1}/{self.config['max_retries']}): {e}")
+                if attempt < self.config["max_retries"] - 1:
+                    delay = self.config["retry_delay"] * (2 ** attempt)
+                    print(f"⏳ Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    return None
+        
+        return None
+    
+    def generate_full_script(self, channel_handle, num_sections=None, words_per_section=None):
+        """Generate a completely unique YouTube script based on the competitor's latest video."""
+        chunk_size = self.config["chunk_size"]
+        
+        print("🎬 Starting YouTube Script Generation...")
+        
+        # Get channel ID from handle
+        print(f"🔍 Getting channel ID from: {channel_handle}")
+        
+        # Handle different input formats
+        if channel_handle.startswith('UC') and len(channel_handle) == 24:
+            # Already a channel ID
+            channel_id = channel_handle
+        else:
+            # It's a handle, convert to channel ID
+            channel_id = self.get_channel_id_from_handle(channel_handle)
+            if not channel_id:
+                # Try the known channel ID for @amhoops
+                if 'amhoops' in channel_handle.lower():
+                    channel_id = "UCtG-elouHQdUnpN9cVLdltg"
+                else:
+                    print("❌ Could not get channel ID from handle")
+                    return None
+        
+        print(f"✅ Channel ID: {channel_id}")
+        
+        # Get latest video transcript
+        print("📹 Fetching latest video from channel...")
+        latest_video_id = self.get_latest_video_id_from_channel_id(channel_id)
+        
+        if not latest_video_id:
+            print("❌ Could not find latest video from channel")
+            return None
+            
+        print(f"✅ Found video ID: {latest_video_id}")
+        
+        # Get transcript
+        print("📝 Fetching video transcript...")
+        original_transcript = self.get_youtube_transcript(latest_video_id)
+        
+        if not original_transcript:
+            print("❌ Could not fetch transcript")
+            return None
+            
+        print(f"✅ Transcript fetched: {len(original_transcript)} characters")
+        print(f"📊 Original word count: {len(original_transcript.split())} words")
+        
+        # Print a preview of the transcript
+        print("\n📋 TRANSCRIPT PREVIEW:")
+        print("-" * 30)
+        preview = original_transcript[:300].replace('\n', ' ')
+        print(f"{preview}...")
+        
+        # Split transcript into chunks
+        print(f"\n🔄 Splitting transcript into {chunk_size}-word chunks...")
+        chunks = self.split_into_chunks(original_transcript, chunk_size)
+        print(f"✅ Created {len(chunks)} chunks")
+        
+        # Rewrite each chunk
+        print(f"\n🔄 Rewriting {len(chunks)} chunks...")
+        rewritten_chunks = []
+        failed_chunks = 0
+        
+        for i, chunk in enumerate(chunks):
+            print(f"⏳ Rewriting chunk {i+1}/{len(chunks)} (Original: {len(chunk.split())} words)...")
+            
+            rewritten_chunk = self.rewrite_chunk(chunk, len(chunk.split()))
+            
+            if rewritten_chunk:
+                rewritten_word_count = len(rewritten_chunk.split())
+                print(f"✅ Chunk {i+1} rewritten successfully (Rewritten: {rewritten_word_count} words)")
+                rewritten_chunks.append(rewritten_chunk)
+            else:
+                print(f"❌ Failed to rewrite chunk {i+1}")
+                # Use original chunk as fallback
+                rewritten_chunks.append(chunk)
+                failed_chunks += 1
+                
+            # Add a small delay between requests to avoid rate limiting
+            time.sleep(0.5)
+        
+        # Combine chunks into full script
+        full_script = '\n\n'.join(rewritten_chunks)
+        
+        # Save complete script
+        if full_script:
+            timestamp = int(time.time())
+            filename = f"unique_youtube_script_{timestamp}.txt"
+            
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"CHANNEL: {channel_handle}\n")
+                f.write(f"VIDEO ID: {latest_video_id}\n")
+                f.write(f"ORIGINAL WORD COUNT: {len(original_transcript.split())}\n")
+                f.write(f"UNIQUE SCRIPT WORD COUNT: {len(full_script.split())}\n")
+                f.write(f"CHUNK SIZE: {chunk_size} words\n")
+                f.write(f"NUMBER OF CHUNKS: {len(chunks)}\n")
+                f.write(f"FAILED CHUNKS: {failed_chunks}\n")
+                f.write("="*50 + "\n\n")
+                f.write("ORIGINAL TRANSCRIPT:\n")
+                f.write("-" * 20 + "\n")
+                f.write(original_transcript[:1000] + "...\n\n")
+                f.write("UNIQUE SCRIPT:\n")
+                f.write("-" * 15 + "\n")
+                f.write(full_script.strip())
+            
+            print(f"\n🎉 Complete unique script saved as: {filename}")
+            print(f"📈 Final word count: {len(full_script.split())} words")
+            if failed_chunks > 0:
+                print(f"⚠️ {failed_chunks} chunks failed to rewrite and were kept as original")
+            return full_script.strip()
+        
+        return None
+
+def main():
+    generator = YouTubeScriptGenerator(CONFIG)
+    
+    CHANNEL_HANDLE = "https://youtube.com/@amhoops"  # Competitor's channel
+    CHUNK_SIZE = CONFIG["chunk_size"]
+    
+    print("🚀 YouTube Script Generator Started!")
+    print(f"📺 Channel: {CHANNEL_HANDLE}")
+    print(f"🔄 Task: Creating a completely unique script from competitor's latest video")
+    print(f"📊 Chunk size: {CHUNK_SIZE} words (maintaining original paragraph length)")
+    print(f"🎙️ Optimized for: Microsoft Edge TTS")
+    print(f"🌐 API: Pollinations.AI (GET method)")
+    print(f"⏱️ Rate limiting: {CONFIG['max_retries']} retries with exponential backoff")
+    print("-" * 50)
+    
+    final_script = generator.generate_full_script(
+        channel_handle=CHANNEL_HANDLE
+    )
+    
+    if final_script:
+        print(f"\n🎊 SUCCESS! Completely unique script created!")
+        print(f"📝 Total words: {len(final_script.split())}")
+        print(f"⏱️ Estimated duration: {len(final_script.split()) // 150} minutes")
+        print("\n📋 PREVIEW:")
+        print("-" * 30)
+        preview = final_script[:500].replace('\n', ' ')
+        print(f"{preview}...")
+        print("\n🎙️ Ready for Microsoft Edge Text-to-Speech!")
+        print("📄 Check the saved file for the complete unique script!")
+        
+        # Save as s1.txt
+        with open("s1.txt", "w", encoding="utf-8") as f:
+            f.write(final_script)
+        print("✅ Script also saved as s1.txt")
+        
+        return final_script
+    else:
+        print("\n❌ Script creation failed")
+        return None
+
+if __name__ == "__main__":
+    main()

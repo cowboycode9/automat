@@ -29,93 +29,134 @@ jobs:
     - name: Generate Script
       run: |
         cat > gen.py << 'EOF'
-        import requests, feedparser, re, time
+        import requests, re, time, feedparser
         from bs4 import BeautifulSoup
-        from playwright.sync_api import sync_playwright
-
-        class Generator:
+        from playwright.sync_api import sync_playwright, TimeoutError as PTimeout
+        
+        class ScriptGen:
             def __init__(self):
-                self.api = "https://text.pollinations.ai"
+                self.base_url = "https://text.pollinations.ai"
+                self.timeout = 30000
             
-            def get_video_id(self, handle):
+            def get_channel_id(self, handle):
                 try:
-                    h = handle.replace('@', '').split('/')[-1]
-                    if 'amhoops' in h.lower(): return "UCtG-elouHQdUnpN9cVLdltg"
+                    h = handle.replace('@', '').replace('https://youtube.com/@', '').replace('https://www.youtube.com/@', '')
                     feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?user={h}")
                     if not feed.entries:
                         feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={h}")
                     if feed.entries:
-                        return re.search(r"v=([a-zA-Z0-9_-]+)", feed.entries[0].link).group(1)
-                except: pass
-                return None
+                        link = feed.feed.get('link', '')
+                        if 'channel/' in link:
+                            return link.split('channel/')[-1]
+                    return 'amhoops' in handle.lower() and "UCtG-elouHQdUnpN9cVLdltg" or None
+                except: return None
             
-            def get_transcript(self, vid_id):
-                with sync_playwright() as p:
-                    try:
-                        page = p.chromium.launch(headless=True).new_page()
-                        page.goto("https://youtubetotranscript.com/", timeout=30000)
-                        page.fill("input.w-full.mb-2.truncate.input.input-bordered.input-rounded.sm\\:w-sm.sm\\:mb-0.sm\\:mr-2", f"https://youtu.be/{vid_id}")
-                        page.click("button.w-full.btn.btn-secondary.btn-rounded.sm\\:w-auto")
-                        page.wait_for_load_state("networkidle", timeout=30000)
-                        time.sleep(2)
-                        soup = BeautifulSoup(page.content(), 'html.parser')
-                        segments = soup.find('div', {'id': 'transcript'}).find_all('span', class_='transcript-segment')
-                        return " ".join(s.get_text().strip() for s in segments if s.get_text().strip())
-                    except Exception as e:
-                        print(f"Error: {e}")
-                        return ""
-            
-            def rewrite(self, text):
-                prompt = f"Rewrite this NBA text to be unique while keeping the same meaning. Make it conversational with [PAUSE] markers for TTS. Keep all NBA names 100% accurate (Tyrese Maxey, Jared McCain, Kyle Lowry, Kelly Oubre Jr, Nikola Jokic, etc): {text}"
+            def get_latest_video(self, channel_id):
                 try:
-                    r = requests.get(f"{self.api}/{requests.utils.quote(prompt)}", timeout=30)
-                    return r.text.strip() if r.status_code == 200 else text
-                except: return text
+                    feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
+                    if feed.entries:
+                        match = re.search(r"v=([a-zA-Z0-9_-]+)", feed.entries[0].link)
+                        return match.group(1) if match else None
+                except: return None
+            
+            def get_transcript(self, video_id):
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    try:
+                        page.goto("https://youtubetotranscript.com/", timeout=self.timeout)
+                        page.wait_for_load_state("networkidle", timeout=self.timeout)
+                        
+                        input_sel = "input.w-full.mb-2.truncate.input.input-bordered.input-rounded.sm\\:w-sm.sm\\:mb-0.sm\\:mr-2"
+                        page.fill(input_sel, f"https://youtu.be/{video_id}")
+                        page.click("button.w-full.btn.btn-secondary.btn-rounded.sm\\:w-auto")
+                        page.wait_for_load_state("networkidle", timeout=self.timeout)
+                        time.sleep(3)
+                        
+                        soup = BeautifulSoup(page.content(), 'html.parser')
+                        div = soup.find('div', {'id': 'transcript'})
+                        if div:
+                            segments = div.find_all('span', class_='transcript-segment')
+                            return " ".join(s.get_text().strip() for s in segments if s.get_text().strip())
+                        return ""
+                    except: return ""
+                    finally: browser.close()
+            
+            def split_chunks(self, text, size=50):
+                words = text.split()
+                chunks = []
+                for i in range(0, len(words), size):
+                    chunks.append(' '.join(words[i:i+size]))
+                return chunks
+            
+            def rewrite_chunk(self, chunk):
+                prompt = f"Rewrite this NBA text to be unique while keeping the same meaning and word count. Make it conversational with [PAUSE] markers for TTS. Keep all NBA player names, teams, coaches 100% accurate (Tyrese Maxey, Jared McCain, Kyle Lowry, Kelly Oubre Jr, Nikola Jokic, etc): {chunk}"
+                url = f"{self.base_url}/{requests.utils.quote(prompt)}"
+                
+                for attempt in range(3):
+                    try:
+                        r = requests.get(url, timeout=30)
+                        if r.status_code == 200:
+                            return r.text.strip()
+                        elif r.status_code == 429:
+                            time.sleep(3 * (2 ** attempt))
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(3 * (2 ** attempt))
+                return chunk
             
             def fix_names(self, text):
                 fixes = {
                     r'Dyres?\s*Maxi': 'Tyrese Maxey',
-                    r'VJ\s*Edgecom': 'Jared McCain',
-                    r'Kyle\s*Larry': 'Kyle Lowry', 
+                    r'VJ\s*Edgecom': 'Jared McCain', 
+                    r'Kyle\s*Larry': 'Kyle Lowry',
                     r'Kelly\s*Ubé': 'Kelly Oubre Jr',
                     r'Nicole?\s*Joic': 'Nikola Jokic'
                 }
-                for p, r in fixes.items():
-                    text = re.sub(p, r, text, flags=re.IGNORECASE)
+                for pattern, fix in fixes.items():
+                    text = re.sub(pattern, fix, text, flags=re.IGNORECASE)
                 return text
             
-            def run(self):
-                print("🚀 Starting...")
-                vid_id = self.get_video_id("https://youtube.com/@amhoops")
-                if not vid_id: return print("❌ No video found")
+            def generate(self, channel):
+                print("🎬 Starting...")
                 
-                print(f"📹 Video: {vid_id}")
-                transcript = self.get_transcript(vid_id)
-                if not transcript: return print("❌ No transcript")
+                channel_id = self.get_channel_id(channel)
+                if not channel_id:
+                    print("❌ No channel ID")
+                    return None
                 
-                print(f"📝 Transcript: {len(transcript)} chars")
-                chunks = [transcript[i:i+2000] for i in range(0, len(transcript), 2000)]
+                video_id = self.get_latest_video(channel_id)
+                if not video_id:
+                    print("❌ No video found")
+                    return None
                 
-                print(f"🔄 Rewriting {len(chunks)} chunks...")
-                result = []
+                transcript = self.get_transcript(video_id)
+                if not transcript:
+                    print("❌ No transcript")
+                    return None
+                
+                print(f"✅ Got {len(transcript.split())} words")
+                
+                chunks = self.split_chunks(transcript)
+                rewritten = []
+                
                 for i, chunk in enumerate(chunks):
                     print(f"⏳ Chunk {i+1}/{len(chunks)}")
-                    rewritten = self.rewrite(chunk)
-                    result.append(rewritten)
-                    time.sleep(1)
+                    rewritten.append(self.rewrite_chunk(chunk))
+                    time.sleep(0.5)
                 
-                script = self.fix_names('\n\n'.join(result))
+                script = self.fix_names('\n\n'.join(rewritten))
                 
                 with open("s1.txt", "w", encoding="utf-8") as f:
                     f.write(script)
-                print("✅ Saved as s1.txt")
+                
+                print("✅ Done!")
                 return script
-
-        Generator().run()
+        
+        ScriptGen().generate("https://youtube.com/@amhoops")
         EOF
         
-        python gen.py
-        rm gen.py
+        python gen.py && rm -f gen.py
         
     - name: Commit
       run: |
@@ -125,7 +166,12 @@ jobs:
         if [ -f "s1.txt" ]; then
           git add s1.txt
           if ! git diff --staged --quiet; then
-            git commit -m "NBA script $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "Generated NBA script - $(date '+%Y-%m-%d %H:%M:%S')"
             git push
+            echo "✅ Pushed s1.txt"
+          else
+            echo "ℹ️ No changes"
           fi
+        else
+          echo "❌ s1.txt not found"
         fi
